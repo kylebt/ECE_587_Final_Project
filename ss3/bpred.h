@@ -91,6 +91,13 @@
  *		are incremented on taken branches and decremented on
  *		no taken branches.  One BTB entry per counter.
  *
+ *	BPredNBPat: A sliding window branch predictor
+ *
+ *		Given 2N bits of branch history, use the last N bits to determine
+ *      if the branch pattern has happened before in the last 2N history bits.
+ *		This is achieved by "sliding" the current history window over the total
+ *		history window and comparing the sub patterns.
+ *
  *	BPredTaken:  static predict branch taken
  *
  *	BPredNotTaken:  static predict branch not taken
@@ -104,6 +111,7 @@ enum bpred_class {
   BPred2bit,			/* 2-bit saturating cntr pred (dir mapped) */
   BPredTaken,			/* static predict taken */
   BPredNotTaken,		/* static predict not taken */
+  BPredNBPat,			/* nBAT prediction (n bit history window compare) */
   BPred_NUM
 };
 
@@ -114,6 +122,16 @@ struct bpred_btb_ent_t {
   md_addr_t target;		/* last destination of branch when taken */
   struct bpred_btb_ent_t *prev, *next; /* lru chaining pointers */
 };
+
+#define NBPAT_MAX_CUR_HISTORY 16
+typedef struct {
+	unsigned int history; //2 * current history bits
+    //Most logic is based on a 2 bit saturating counter; set this to >2 to indicate taken, 
+    // <2 to indicate not taken
+	unsigned char tempCountToMakeSimHappy; 
+	unsigned char fillCount;
+	unsigned int reserved : 16;
+} bpred_nbpat_entry;
 
 /* direction predictor def */
 struct bpred_dir_t {
@@ -130,7 +148,12 @@ struct bpred_dir_t {
       int xor;			/* history xor address flag */
       int *shiftregs;		/* level-1 history table */
       unsigned char *l2table;	/* level-2 prediction state table */
-    } two;
+    } two;	
+	struct {
+	  unsigned int size;		  /* number of entries in table */
+	  unsigned int nbpatBits;     /* number of bits in current pattern (see paper) */
+	  bpred_nbpat_entry *table;  /* branch history table, up to 32NBPAT */
+	} nbpat;
   } config;
 };
 
@@ -141,6 +164,8 @@ struct bpred_t {
     struct bpred_dir_t *bimod;	  /* first direction predictor */
     struct bpred_dir_t *twolev;	  /* second direction predictor */
     struct bpred_dir_t *meta;	  /* meta predictor */
+	struct bpred_dir_t *nbpat;  /* primary direction predictor */
+	struct bpred_dir_t *secondary;/* secondary direction predictor */
   } dirpred;
 
   struct {
@@ -171,6 +196,9 @@ struct bpred_t {
   counter_t retstack_pops;	/* number of times a value was popped */
   counter_t retstack_pushes;	/* number of times a value was pushed */
   counter_t ras_hits;		/* num correct return-address predictions */
+  
+  counter_t used_nbpat;		/* number of times nbpat predictor was used */
+  counter_t used_altpred; 	/* number of times alternative predictor was used*/
 };
 
 /* branch predictor update information */

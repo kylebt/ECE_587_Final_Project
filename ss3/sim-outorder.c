@@ -123,6 +123,11 @@ static int twolev_nelt = 4;
 static int twolev_config[4] =
   { /* l1size */1, /* l2size */1024, /* hist */8, /* xor */FALSE};
 
+/* 2-level predictor config (<tableSize> <nbpatBits>) */
+static int nbpat_nelt = 2;
+static int nbpat_config[2] =
+  { /* tableSize */2048, /* nbpatBits */16};
+  
 /* combining predictor config (<meta_table_size> */
 static int comb_nelt = 1;
 static int comb_config[1] =
@@ -650,7 +655,7 @@ sim_reg_options(struct opt_odb_t *odb)
                );
 
   opt_reg_string(odb, "-bpred",
-		 "branch predictor type {nottaken|taken|perfect|bimod|2lev|comb}",
+		 "branch predictor type {nottaken|taken|perfect|bimod|2lev|comb|nbpat}",
                  &pred_type, /* default */"bimod",
                  /* print */TRUE, /* format */NULL);
 
@@ -665,6 +670,13 @@ sim_reg_options(struct opt_odb_t *odb)
 		   "(<l1size> <l2size> <hist_size> <xor>)",
                    twolev_config, twolev_nelt, &twolev_nelt,
 		   /* default */twolev_config,
+                   /* print */TRUE, /* format */NULL, /* !accrue */FALSE);
+                   
+  opt_reg_int_list(odb, "-bpred:nbpat",
+                   "nBPat \"history window\" config "
+		   "( <tableSize> <nbpatBits> )",
+                   nbpat_config, nbpat_nelt, &nbpat_nelt,
+		   /* default */nbpat_config,
                    /* print */TRUE, /* format */NULL, /* !accrue */FALSE);
 
   opt_reg_int_list(odb, "-bpred:comb",
@@ -893,7 +905,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
 
   if (fetch_speed < 1)
     fatal("front-end speed must be positive and non-zero");
-
+  
   if (!mystricmp(pred_type, "perfect"))
     {
       /* perfect predictor */
@@ -972,6 +984,23 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
 			  /* btb assoc */btb_config[1],
 			  /* ret-addr stack size */ras_size);
     }
+  else if(!mystricmp(pred_type, "nbpat"))
+  {
+    if (nbpat_nelt != 2)
+      fatal("bad nbpat pred config (<tableSize> <nbpatBits> )");
+    
+      pred = bpred_create(BPredNBPat,
+        /* bimod table size */ 0, //bimod_config[0],
+			  /* l1 size */nbpat_config[0],
+			  /* l2 size */ 0, //twolev_config[1],
+			  /* meta table size */ 0, //comb_config[0],
+			  /* history reg size */ nbpat_config[1],
+			  /* history xor address */ 0, //twolev_config[3],
+			  /* btb sets */btb_config[0],
+			  /* btb assoc */btb_config[1],
+			  /* ret-addr stack size */ras_size);
+      
+  }
   else
     fatal("cannot parse predictor type `%s'", pred_type);
 
@@ -4219,101 +4248,101 @@ ruu_fetch(void)
 
       /* is this a bogus text address? (can happen on mis-spec path) */
       if (ld_text_base <= fetch_regs_PC
-	  && fetch_regs_PC < (ld_text_base+ld_text_size)
-	  && !(fetch_regs_PC & (sizeof(md_inst_t)-1)))
-	{
-	  /* read instruction from memory */
-	  MD_FETCH_INST(inst, mem, fetch_regs_PC);
+        && fetch_regs_PC < (ld_text_base+ld_text_size)
+        && !(fetch_regs_PC & (sizeof(md_inst_t)-1)))
+      {
+        /* read instruction from memory */
+        MD_FETCH_INST(inst, mem, fetch_regs_PC);
 
-	  /* address is within program text, read instruction from memory */
-	  lat = cache_il1_lat;
-	  if (cache_il1)
-	    {
-	      /* access the I-cache */
-	      lat =
-		cache_access(cache_il1, Read, IACOMPRESS(fetch_regs_PC),
-			     NULL, ISCOMPRESS(sizeof(md_inst_t)), sim_cycle,
-			     NULL, NULL);
-	      if (lat > cache_il1_lat)
-		last_inst_missed = TRUE;
-	    }
+        /* address is within program text, read instruction from memory */
+        lat = cache_il1_lat;
+        if (cache_il1)
+          {
+            /* access the I-cache */
+            lat =
+        cache_access(cache_il1, Read, IACOMPRESS(fetch_regs_PC),
+               NULL, ISCOMPRESS(sizeof(md_inst_t)), sim_cycle,
+               NULL, NULL);
+            if (lat > cache_il1_lat)
+              last_inst_missed = TRUE;
+          }
 
-	  if (itlb)
-	    {
-	      /* access the I-TLB, NOTE: this code will initiate
-		 speculative TLB misses */
-	      tlb_lat =
-		cache_access(itlb, Read, IACOMPRESS(fetch_regs_PC),
-			     NULL, ISCOMPRESS(sizeof(md_inst_t)), sim_cycle,
-			     NULL, NULL);
-	      if (tlb_lat > 1)
-		last_inst_tmissed = TRUE;
+        if (itlb)
+          {
+            /* access the I-TLB, NOTE: this code will initiate
+         speculative TLB misses */
+            tlb_lat =
+        cache_access(itlb, Read, IACOMPRESS(fetch_regs_PC),
+               NULL, ISCOMPRESS(sizeof(md_inst_t)), sim_cycle,
+               NULL, NULL);
+            if (tlb_lat > 1)
+              last_inst_tmissed = TRUE;
 
-	      /* I-cache/I-TLB accesses occur in parallel */
-	      lat = MAX(tlb_lat, lat);
-	    }
+            /* I-cache/I-TLB accesses occur in parallel */
+            lat = MAX(tlb_lat, lat);
+          }
 
-	  /* I-cache/I-TLB miss? assumes I-cache hit >= I-TLB hit */
-	  if (lat != cache_il1_lat)
-	    {
-	      /* I-cache miss, block fetch until it is resolved */
-	      ruu_fetch_issue_delay += lat - 1;
-	      break;
-	    }
-	  /* else, I-cache/I-TLB hit */
-	}
+        /* I-cache/I-TLB miss? assumes I-cache hit >= I-TLB hit */
+        if (lat != cache_il1_lat)
+          {
+            /* I-cache miss, block fetch until it is resolved */
+            ruu_fetch_issue_delay += lat - 1;
+            break;
+          }
+        /* else, I-cache/I-TLB hit */
+      }
       else
-	{
-	  /* fetch PC is bogus, send a NOP down the pipeline */
-	  inst = MD_NOP_INST;
-	}
+      {
+        /* fetch PC is bogus, send a NOP down the pipeline */
+        inst = MD_NOP_INST;
+      }
 
       /* have a valid inst, here */
 
       /* possibly use the BTB target */
       if (pred)
-	{
-	  enum md_opcode op;
+      {
+        enum md_opcode op;
 
-	  /* pre-decode instruction, used for bpred stats recording */
-	  MD_SET_OPCODE(op, inst);
-	  
-	  /* get the next predicted fetch address; only use branch predictor
-	     result for branches (assumes pre-decode bits); NOTE: returned
-	     value may be 1 if bpred can only predict a direction */
-	  if (MD_OP_FLAGS(op) & F_CTRL)
-	    fetch_pred_PC =
-	      bpred_lookup(pred,
-			   /* branch address */fetch_regs_PC,
-			   /* target address *//* FIXME: not computed */0,
-			   /* opcode */op,
-			   /* call? */MD_IS_CALL(op),
-			   /* return? */MD_IS_RETURN(op),
-			   /* updt */&(fetch_data[fetch_tail].dir_update),
-			   /* RSB index */&stack_recover_idx);
-	  else
-	    fetch_pred_PC = 0;
+        /* pre-decode instruction, used for bpred stats recording */
+        MD_SET_OPCODE(op, inst);
+        
+        /* get the next predicted fetch address; only use branch predictor
+           result for branches (assumes pre-decode bits); NOTE: returned
+           value may be 1 if bpred can only predict a direction */
+        if (MD_OP_FLAGS(op) & F_CTRL)
+          fetch_pred_PC =
+            bpred_lookup(pred,
+             /* branch address */fetch_regs_PC,
+             /* target address *//* FIXME: not computed */0,
+             /* opcode */op,
+             /* call? */MD_IS_CALL(op),
+             /* return? */MD_IS_RETURN(op),
+             /* updt */&(fetch_data[fetch_tail].dir_update),
+             /* RSB index */&stack_recover_idx);
+        else
+          fetch_pred_PC = 0;
 
-	  /* valid address returned from branch predictor? */
-	  if (!fetch_pred_PC)
-	    {
-	      /* no predicted taken target, attempt not taken target */
-	      fetch_pred_PC = fetch_regs_PC + sizeof(md_inst_t);
-	    }
-	  else
-	    {
-	      /* go with target, NOTE: discontinuous fetch, so terminate */
-	      branch_cnt++;
-	      if (branch_cnt >= fetch_speed)
-		done = TRUE;
-	    }
-	}
+        /* valid address returned from branch predictor? */
+        if (!fetch_pred_PC)
+          {
+            /* no predicted taken target, attempt not taken target */
+            fetch_pred_PC = fetch_regs_PC + sizeof(md_inst_t);
+          }
+        else
+          {
+            /* go with target, NOTE: discontinuous fetch, so terminate */
+            branch_cnt++;
+            if (branch_cnt >= fetch_speed)
+              done = TRUE;
+          }
+      }
       else
-	{
-	  /* no predictor, just default to predict not taken, and
-	     continue fetching instructions linearly */
-	  fetch_pred_PC = fetch_regs_PC + sizeof(md_inst_t);
-	}
+      {
+        /* no predictor, just default to predict not taken, and
+           continue fetching instructions linearly */
+        fetch_pred_PC = fetch_regs_PC + sizeof(md_inst_t);
+      }
 
       /* commit this instruction to the IFETCH -> DISPATCH queue */
       fetch_data[fetch_tail].IR = inst;
@@ -4459,64 +4488,64 @@ sim_main(void)
       fprintf(stderr, "sim: ** fast forwarding %d insts **\n", fastfwd_count);
 
       for (icount=0; icount < fastfwd_count; icount++)
-	{
-	  /* maintain $r0 semantics */
-	  regs.regs_R[MD_REG_ZERO] = 0;
+      {
+        /* maintain $r0 semantics */
+        regs.regs_R[MD_REG_ZERO] = 0;
 #ifdef TARGET_ALPHA
-	  regs.regs_F.d[MD_REG_ZERO] = 0.0;
+        regs.regs_F.d[MD_REG_ZERO] = 0.0;
 #endif /* TARGET_ALPHA */
 
-	  /* get the next instruction to execute */
-	  MD_FETCH_INST(inst, mem, regs.regs_PC);
+        /* get the next instruction to execute */
+        MD_FETCH_INST(inst, mem, regs.regs_PC);
 
-	  /* set default reference address */
-	  addr = 0; is_write = FALSE;
+        /* set default reference address */
+        addr = 0; is_write = FALSE;
 
-	  /* set default fault - none */
-	  fault = md_fault_none;
+        /* set default fault - none */
+        fault = md_fault_none;
 
-	  /* decode the instruction */
-	  MD_SET_OPCODE(op, inst);
+        /* decode the instruction */
+        MD_SET_OPCODE(op, inst);
 
-	  /* execute the instruction */
-	  switch (op)
-	    {
-#define DEFINST(OP,MSK,NAME,OPFORM,RES,FLAGS,O1,O2,I1,I2,I3)		\
-	    case OP:							\
-	      SYMCAT(OP,_IMPL);						\
-	      break;
-#define DEFLINK(OP,MSK,NAME,MASK,SHIFT)					\
-	    case OP:							\
-	      panic("attempted to execute a linking opcode");
-#define CONNECT(OP)
-#undef DECLARE_FAULT
-#define DECLARE_FAULT(FAULT)						\
-	      { fault = (FAULT); break; }
-#include "machine.def"
-	    default:
-	      panic("attempted to execute a bogus opcode");
-	    }
+        /* execute the instruction */
+        switch (op)
+          {
+    #define DEFINST(OP,MSK,NAME,OPFORM,RES,FLAGS,O1,O2,I1,I2,I3)		\
+          case OP:							\
+            SYMCAT(OP,_IMPL);						\
+            break;
+    #define DEFLINK(OP,MSK,NAME,MASK,SHIFT)					\
+          case OP:							\
+            panic("attempted to execute a linking opcode");
+    #define CONNECT(OP)
+    #undef DECLARE_FAULT
+    #define DECLARE_FAULT(FAULT)						\
+            { fault = (FAULT); break; }
+    #include "machine.def"
+          default:
+            panic("attempted to execute a bogus opcode");
+          }
 
-	  if (fault != md_fault_none)
-	    fatal("fault (%d) detected @ 0x%08p", fault, regs.regs_PC);
+        if (fault != md_fault_none)
+          fatal("fault (%d) detected @ 0x%08p", fault, regs.regs_PC);
 
-	  /* update memory access stats */
-	  if (MD_OP_FLAGS(op) & F_MEM)
-	    {
-	      if (MD_OP_FLAGS(op) & F_STORE)
-		is_write = TRUE;
-	    }
+        /* update memory access stats */
+        if (MD_OP_FLAGS(op) & F_MEM)
+          {
+            if (MD_OP_FLAGS(op) & F_STORE)
+        is_write = TRUE;
+          }
 
-	  /* check for DLite debugger entry condition */
-	  if (dlite_check_break(regs.regs_NPC,
-				is_write ? ACCESS_WRITE : ACCESS_READ,
-				addr, sim_num_insn, sim_num_insn))
-	    dlite_main(regs.regs_PC, regs.regs_NPC, sim_num_insn, &regs, mem);
+        /* check for DLite debugger entry condition */
+        if (dlite_check_break(regs.regs_NPC,
+            is_write ? ACCESS_WRITE : ACCESS_READ,
+            addr, sim_num_insn, sim_num_insn))
+          dlite_main(regs.regs_PC, regs.regs_NPC, sim_num_insn, &regs, mem);
 
-	  /* go to the next instruction */
-	  regs.regs_PC = regs.regs_NPC;
-	  regs.regs_NPC += sizeof(md_inst_t);
-	}
+        /* go to the next instruction */
+        regs.regs_PC = regs.regs_NPC;
+        regs.regs_NPC += sizeof(md_inst_t);
+      }
     }
 
   fprintf(stderr, "sim: ** starting performance simulation **\n");
@@ -4532,11 +4561,11 @@ sim_main(void)
     {
       /* RUU/LSQ sanity checks */
       if (RUU_num < LSQ_num)
-	panic("RUU_num < LSQ_num");
+        panic("RUU_num < LSQ_num");
       if (((RUU_head + RUU_num) % RUU_size) != RUU_tail)
-	panic("RUU_head/RUU_tail wedged");
+        panic("RUU_head/RUU_tail wedged");
       if (((LSQ_head + LSQ_num) % LSQ_size) != LSQ_tail)
-	panic("LSQ_head/LSQ_tail wedged");
+        panic("LSQ_head/LSQ_tail wedged");
 
       /* check if pipetracing is still active */
       ptrace_check_active(regs.regs_PC, sim_num_insn, sim_cycle);

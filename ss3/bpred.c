@@ -107,6 +107,13 @@ bpred_create(enum bpred_class class,	/* type of predictor to create */
   case BPred2bit:
     pred->dirpred.bimod = 
       bpred_dir_create(class, bimod_size, 0, 0, 0);
+    break;
+    
+  case BPredNBPat:
+    pred->dirpred.nbpat =
+      bpred_dir_create(class, l1size, 0, shift_width, 0);
+    //TODO: Create secondary predictor for hybrid
+    break;
 
   case BPredTaken:
   case BPredNotTaken:
@@ -122,6 +129,7 @@ bpred_create(enum bpred_class class,	/* type of predictor to create */
   case BPredComb:
   case BPred2Level:
   case BPred2bit:
+  case BPredNBPat:  //nBPat can use BTB and RAS.. will help accentuate benefits
     {
       int i;
 
@@ -250,6 +258,21 @@ bpred_dir_create (
       }
 
     break;
+  
+  case BPredNBPat:
+    if (!l1size || (l1size & (l1size-1)) != 0)
+      fatal("table size, `%d', must be non-zero and a power of two", 
+	    l1size);
+    pred_dir->config.nbpat.size = l1size;
+    if (!shift_width || shift_width > 16)
+        fatal("nbpat pattern bits (shift_width), `%d', must be non-zero and positive",
+	      shift_width);
+    pred_dir->config.nbpat.nbpatBits = shift_width;
+    if (!(pred_dir->config.bimod.table = calloc(l1size, sizeof(bpred_nbpat_entry))))
+      fatal("cannot allocate nbpat storage");
+    //Zero this memory to intialize counters and history to zero
+    memset(pred_dir->config.nbpat.table, 0, l1size * sizeof(bpred_nbpat_entry));
+    break;
 
   case BPredTaken:
   case BPredNotTaken:
@@ -281,6 +304,11 @@ bpred_dir_config(
   case BPred2bit:
     fprintf(stream, "pred_dir: %s: 2-bit: %d entries, direct-mapped\n",
       name, pred_dir->config.bimod.size);
+    break;
+    
+  case BPredNBPat:
+    fprintf(stream, "pred_dir: %s: nBPat: %d entries, %d pattern bits\n",
+      name, pred_dir->config.nbpat.size, pred_dir->config.nbpat.nbpatBits);
     break;
 
   case BPredTaken:
@@ -320,6 +348,13 @@ bpred_config(struct bpred_t *pred,	/* branch predictor instance */
 
   case BPred2bit:
     bpred_dir_config (pred->dirpred.bimod, "bimod", stream);
+    fprintf(stream, "btb: %d sets x %d associativity", 
+	    pred->btb.sets, pred->btb.assoc);
+    fprintf(stream, "ret_stack: %d entries", pred->retstack.size);
+    break;
+    
+  case BPredNBPat:
+    bpred_dir_config (pred->dirpred.nbpat, "nBPat", stream);
     fprintf(stream, "btb: %d sets x %d associativity", 
 	    pred->btb.sets, pred->btb.assoc);
     fprintf(stream, "ret_stack: %d entries", pred->retstack.size);
@@ -367,6 +402,9 @@ bpred_reg_stats(struct bpred_t *pred,	/* branch predictor instance */
     case BPred2bit:
       name = "bpred_bimod";
       break;
+    case BPredNBPat:
+      name = "bpred_nbpat";
+      break;
     case BPredTaken:
       name = "bpred_taken";
       break;
@@ -391,6 +429,7 @@ bpred_reg_stats(struct bpred_t *pred,	/* branch predictor instance */
 		   "total number of direction-predicted hits "
 		   "(includes addr-hits)", 
 		   &pred->dir_hits, 0, NULL);
+  //TODO: Something like this for hybrid branch prediction
   if (pred->class == BPredComb)
     {
       sprintf(buf, "%s.used_bimod", name);
@@ -504,34 +543,69 @@ bpred_dir_lookup(struct bpred_dir_t *pred_dir,	/* branch dir predictor inst */
         l1index = (baddr >> MD_BR_SHIFT) & (pred_dir->config.two.l1size - 1);
         l2index = pred_dir->config.two.shiftregs[l1index];
         if (pred_dir->config.two.xor)
-	  {
-#if 1
-	    /* this L2 index computation is more "compatible" to McFarling's
-	       verison of it, i.e., if the PC xor address component is only
-	       part of the index, take the lower order address bits for the
-	       other part of the index, rather than the higher order ones */
-	    l2index = (((l2index ^ (baddr >> MD_BR_SHIFT))
-			& ((1 << pred_dir->config.two.shift_width) - 1))
-		       | ((baddr >> MD_BR_SHIFT)
-			  << pred_dir->config.two.shift_width));
-#else
-	    l2index = l2index ^ (baddr >> MD_BR_SHIFT);
-#endif
-	  }
-	else
-	  {
-	    l2index =
-	      l2index
-		| ((baddr >> MD_BR_SHIFT) << pred_dir->config.two.shift_width);
-	  }
-        l2index = l2index & (pred_dir->config.two.l2size - 1);
+        {
+    #if 1
+          /* this L2 index computation is more "compatible" to McFarling's
+             verison of it, i.e., if the PC xor address component is only
+             part of the index, take the lower order address bits for the
+             other part of the index, rather than the higher order ones */
+          l2index = (((l2index ^ (baddr >> MD_BR_SHIFT))
+          & ((1 << pred_dir->config.two.shift_width) - 1))
+               | ((baddr >> MD_BR_SHIFT)
+            << pred_dir->config.two.shift_width));
+    #else
+          l2index = l2index ^ (baddr >> MD_BR_SHIFT);
+    #endif
+        }
+        else
+          {
+            l2index =
+              l2index
+          | ((baddr >> MD_BR_SHIFT) << pred_dir->config.two.shift_width);
+          }
+              l2index = l2index & (pred_dir->config.two.l2size - 1);
 
-        /* get a pointer to prediction state information */
-        p = &pred_dir->config.two.l2table[l2index];
+              /* get a pointer to prediction state information */
+              p = &pred_dir->config.two.l2table[l2index];
       }
       break;
     case BPred2bit:
       p = &pred_dir->config.bimod.table[BIMOD_HASH(pred_dir, baddr)];
+      break;
+    case BPredNBPat:
+      {
+        bpred_nbpat_entry* entry;
+        unsigned char ready, predTaken;
+        unsigned int tempWindow, currentPattern;
+        int tableIndex, searchIndex; 
+        tableIndex = (pred_dir->config.nbpat.size - 1) & baddr;
+        //Entry is ready if 2 * current history pattern bits have been filled in global history
+        entry = &pred_dir->config.nbpat.table[tableIndex];
+        ready = (entry->fillCount >= (2 * pred_dir->config.nbpat.nbpatBits));
+        predTaken = 0; //Default is to predict not taken
+        if(ready) {
+            currentPattern = (entry->history >> pred_dir->config.nbpat.nbpatBits)
+                                & ((1 << pred_dir->config.nbpat.nbpatBits) - 1);
+                                
+            //Shift from 0 to n-2; can't match the pattern at the end because the following bit is the prediction
+            for(searchIndex = 0; searchIndex < pred_dir->config.nbpat.nbpatBits; ++searchIndex)
+            {
+                tempWindow = (entry->history >> searchIndex)
+                                & ((1 << pred_dir->config.nbpat.nbpatBits) - 1);
+                
+                if((tempWindow & currentPattern) == currentPattern)
+                {
+                    predTaken = (unsigned char)((entry->history
+                             >> (pred_dir->config.nbpat.nbpatBits + searchIndex)) & 0x1);
+                                    
+                    break;
+                }
+            }
+        }
+        
+        entry->tempCountToMakeSimHappy = predTaken ? 3 : 0; //Pretend saturating counter value
+        p = &(entry->tempCountToMakeSimHappy);
+      }
       break;
     case BPredTaken:
     case BPredNotTaken:
@@ -581,52 +655,59 @@ bpred_lookup(struct bpred_t *pred,	/* branch predictor instance */
   switch (pred->class) {
     case BPredComb:
       if ((MD_OP_FLAGS(op) & (F_CTRL|F_UNCOND)) != (F_CTRL|F_UNCOND))
-	{
-	  char *bimod, *twolev, *meta;
-	  bimod = bpred_dir_lookup (pred->dirpred.bimod, baddr);
-	  twolev = bpred_dir_lookup (pred->dirpred.twolev, baddr);
-	  meta = bpred_dir_lookup (pred->dirpred.meta, baddr);
-	  dir_update_ptr->pmeta = meta;
-	  dir_update_ptr->dir.meta  = (*meta >= 2);
-	  dir_update_ptr->dir.bimod = (*bimod >= 2);
-	  dir_update_ptr->dir.twolev  = (*twolev >= 2);
-	  if (*meta >= 2)
-	    {
-	      dir_update_ptr->pdir1 = twolev;
-	      dir_update_ptr->pdir2 = bimod;
-	    }
-	  else
-	    {
-	      dir_update_ptr->pdir1 = bimod;
-	      dir_update_ptr->pdir2 = twolev;
-	    }
-	}
+      {
+        char *bimod, *twolev, *meta;
+        bimod = bpred_dir_lookup (pred->dirpred.bimod, baddr);
+        twolev = bpred_dir_lookup (pred->dirpred.twolev, baddr);
+        meta = bpred_dir_lookup (pred->dirpred.meta, baddr);
+        dir_update_ptr->pmeta = meta;
+        dir_update_ptr->dir.meta  = (*meta >= 2);
+        dir_update_ptr->dir.bimod = (*bimod >= 2);
+        dir_update_ptr->dir.twolev  = (*twolev >= 2);
+        if (*meta >= 2)
+          {
+            dir_update_ptr->pdir1 = twolev;
+            dir_update_ptr->pdir2 = bimod;
+          }
+        else
+          {
+            dir_update_ptr->pdir1 = bimod;
+            dir_update_ptr->pdir2 = twolev;
+          }
+      }
       break;
     case BPred2Level:
       if ((MD_OP_FLAGS(op) & (F_CTRL|F_UNCOND)) != (F_CTRL|F_UNCOND))
-	{
-	  dir_update_ptr->pdir1 =
-	    bpred_dir_lookup (pred->dirpred.twolev, baddr);
-	}
+      {
+        dir_update_ptr->pdir1 =
+          bpred_dir_lookup (pred->dirpred.twolev, baddr);
+      }
       break;
     case BPred2bit:
       if ((MD_OP_FLAGS(op) & (F_CTRL|F_UNCOND)) != (F_CTRL|F_UNCOND))
-	{
-	  dir_update_ptr->pdir1 =
-	    bpred_dir_lookup (pred->dirpred.bimod, baddr);
-	}
+      {
+        dir_update_ptr->pdir1 =
+          bpred_dir_lookup (pred->dirpred.bimod, baddr);
+      }
+      break;
+    case BPredNBPat:
+      if ((MD_OP_FLAGS(op) & (F_CTRL|F_UNCOND)) != (F_CTRL|F_UNCOND))
+      {
+        dir_update_ptr->pdir1 =
+          bpred_dir_lookup (pred->dirpred.nbpat, baddr);
+      }
       break;
     case BPredTaken:
       return btarget;
     case BPredNotTaken:
       if ((MD_OP_FLAGS(op) & (F_CTRL|F_UNCOND)) != (F_CTRL|F_UNCOND))
-	{
-	  return baddr + sizeof(md_inst_t);
-	}
+      {
+        return baddr + sizeof(md_inst_t);
+      }
       else
-	{
-	  return btarget;
-	}
+      {
+        return btarget;
+      }
     default:
       panic("bogus predictor class");
   }
@@ -675,18 +756,18 @@ bpred_lookup(struct bpred_t *pred,	/* branch predictor instance */
 
       /* Now we know the set; look for a PC match */
       for (i = index; i < (index+pred->btb.assoc) ; i++)
-	if (pred->btb.btb_data[i].addr == baddr)
-	  {
-	    /* match */
-	    pbtb = &pred->btb.btb_data[i];
-	    break;
-	  }
+        if (pred->btb.btb_data[i].addr == baddr)
+          {
+            /* match */
+            pbtb = &pred->btb.btb_data[i];
+            break;
+          }
     }	
   else
     {
       pbtb = &pred->btb.btb_data[index];
       if (pbtb->addr != baddr)
-	pbtb = NULL;
+        pbtb = NULL;
     }
 
   /*
@@ -773,14 +854,14 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
     {
       pred->used_ras++;
       if (correct)
-	pred->ras_hits++;
+        pred->ras_hits++;
     }
   else if ((MD_OP_FLAGS(op) & (F_CTRL|F_COND)) == (F_CTRL|F_COND))
     {
       if (dir_update_ptr->dir.meta)
-	pred->used_2lev++;
+        pred->used_2lev++;
       else
-	pred->used_bimod++;
+        pred->used_bimod++;
     }
 
   /* keep stats about JR's; also, but don't change any bpred state for JR's
@@ -789,19 +870,19 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
     {
       pred->jr_seen++;
       if (correct)
-	pred->jr_hits++;
+        pred->jr_hits++;
       
       if (!dir_update_ptr->dir.ras)
-	{
-	  pred->jr_non_ras_seen++;
-	  if (correct)
-	    pred->jr_non_ras_hits++;
-	}
+      {
+        pred->jr_non_ras_seen++;
+        if (correct)
+          pred->jr_non_ras_hits++;
+      }
       else
-	{
-	  /* return that used the ret-addr stack; no further work to do */
-	  return;
-	}
+      {
+        /* return that used the ret-addr stack; no further work to do */
+        return;
+      }
     }
 
   /* Can exit now if this is a stateless predictor */
@@ -826,8 +907,8 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
 
   /* update L1 table if appropriate */
   /* L1 table is updated unconditionally for combining predictor too */
-  if ((MD_OP_FLAGS(op) & (F_CTRL|F_UNCOND)) != (F_CTRL|F_UNCOND) &&
-      (pred->class == BPred2Level || pred->class == BPredComb))
+  if ((MD_OP_FLAGS(op) & (F_CTRL|F_UNCOND)) != (F_CTRL|F_UNCOND)) {
+    if(pred->class == BPred2Level || pred->class == BPredComb)
     {
       int l1index, shift_reg;
       
@@ -839,6 +920,17 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
       pred->dirpred.twolev->config.two.shiftregs[l1index] =
 	shift_reg & ((1 << pred->dirpred.twolev->config.two.shift_width) - 1);
     }
+    else if(pred->class == BPredNBPat)
+    {
+        bpred_nbpat_entry* entry;
+        entry = &pred->dirpred.nbpat->config.nbpat.table[(baddr & (pred->dirpred.nbpat->config.nbpat.size - 1))];
+        entry->history = (entry->history << 1) | ((taken > 0) & 0x1);
+        if(entry->fillCount < (2 * pred->dirpred.nbpat->config.nbpat.nbpatBits))
+        {
+            entry->fillCount++;
+        }
+    }
+  }
 
   /* find BTB entry if it's a taken branch (don't allocate for non-taken) */
   if (taken)
@@ -846,61 +938,61 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
       index = (baddr >> MD_BR_SHIFT) & (pred->btb.sets - 1);
       
       if (pred->btb.assoc > 1)
-	{
-	  index *= pred->btb.assoc;
-	  
-	  /* Now we know the set; look for a PC match; also identify
-	   * MRU and LRU items */
-	  for (i = index; i < (index+pred->btb.assoc) ; i++)
-	    {
-	      if (pred->btb.btb_data[i].addr == baddr)
-		{
-		  /* match */
-		  assert(!pbtb);
-		  pbtb = &pred->btb.btb_data[i];
-		}
-	      
-	      dassert(pred->btb.btb_data[i].prev 
-		      != pred->btb.btb_data[i].next);
-	      if (pred->btb.btb_data[i].prev == NULL)
-		{
-		  /* this is the head of the lru list, ie current MRU item */
-		  dassert(lruhead == NULL);
-		  lruhead = &pred->btb.btb_data[i];
-		}
-	      if (pred->btb.btb_data[i].next == NULL)
-		{
-		  /* this is the tail of the lru list, ie the LRU item */
-		  dassert(lruitem == NULL);
-		  lruitem = &pred->btb.btb_data[i];
-		}
-	    }
-	  dassert(lruhead && lruitem);
-	  
-	  if (!pbtb)
-	    /* missed in BTB; choose the LRU item in this set as the victim */
-	    pbtb = lruitem;	
-	  /* else hit, and pbtb points to matching BTB entry */
-	  
-	  /* Update LRU state: selected item, whether selected because it
-	   * matched or because it was LRU and selected as a victim, becomes 
-	   * MRU */
-	  if (pbtb != lruhead)
-	    {
-	      /* this splices out the matched entry... */
-	      if (pbtb->prev)
-		pbtb->prev->next = pbtb->next;
-	      if (pbtb->next)
-		pbtb->next->prev = pbtb->prev;
-	      /* ...and this puts the matched entry at the head of the list */
-	      pbtb->next = lruhead;
-	      pbtb->prev = NULL;
-	      lruhead->prev = pbtb;
-	      dassert(pbtb->prev || pbtb->next);
-	      dassert(pbtb->prev != pbtb->next);
-	    }
-	  /* else pbtb is already MRU item; do nothing */
-	}
+      {
+        index *= pred->btb.assoc;
+        
+        /* Now we know the set; look for a PC match; also identify
+         * MRU and LRU items */
+        for (i = index; i < (index+pred->btb.assoc) ; i++)
+          {
+            if (pred->btb.btb_data[i].addr == baddr)
+            {
+              /* match */
+              assert(!pbtb);
+              pbtb = &pred->btb.btb_data[i];
+            }
+            
+            dassert(pred->btb.btb_data[i].prev 
+              != pred->btb.btb_data[i].next);
+            if (pred->btb.btb_data[i].prev == NULL)
+            {
+              /* this is the head of the lru list, ie current MRU item */
+              dassert(lruhead == NULL);
+              lruhead = &pred->btb.btb_data[i];
+            }
+            if (pred->btb.btb_data[i].next == NULL)
+            {
+              /* this is the tail of the lru list, ie the LRU item */
+              dassert(lruitem == NULL);
+              lruitem = &pred->btb.btb_data[i];
+            }
+          }
+        dassert(lruhead && lruitem);
+        
+        if (!pbtb)
+          /* missed in BTB; choose the LRU item in this set as the victim */
+          pbtb = lruitem;	
+        /* else hit, and pbtb points to matching BTB entry */
+        
+        /* Update LRU state: selected item, whether selected because it
+         * matched or because it was LRU and selected as a victim, becomes 
+         * MRU */
+        if (pbtb != lruhead)
+          {
+            /* this splices out the matched entry... */
+            if (pbtb->prev)
+        pbtb->prev->next = pbtb->next;
+            if (pbtb->next)
+        pbtb->next->prev = pbtb->prev;
+            /* ...and this puts the matched entry at the head of the list */
+            pbtb->next = lruhead;
+            pbtb->prev = NULL;
+            lruhead->prev = pbtb;
+            dassert(pbtb->prev || pbtb->next);
+            dassert(pbtb->prev != pbtb->next);
+          }
+        /* else pbtb is already MRU item; do nothing */
+      }
       else
 	pbtb = &pred->btb.btb_data[index];
     }
@@ -915,15 +1007,15 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
   if (dir_update_ptr->pdir1)
     {
       if (taken)
-	{
-	  if (*dir_update_ptr->pdir1 < 3)
-	    ++*dir_update_ptr->pdir1;
-	}
+      {
+        if (*dir_update_ptr->pdir1 < 3)
+          ++*dir_update_ptr->pdir1;
+      }
       else
-	{ /* not taken */
-	  if (*dir_update_ptr->pdir1 > 0)
-	    --*dir_update_ptr->pdir1;
-	}
+      { /* not taken */
+        if (*dir_update_ptr->pdir1 > 0)
+          --*dir_update_ptr->pdir1;
+      }
     }
 
   /* combining predictor also updates second predictor and meta predictor */
@@ -931,36 +1023,36 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
   if (dir_update_ptr->pdir2)
     {
       if (taken)
-	{
-	  if (*dir_update_ptr->pdir2 < 3)
-	    ++*dir_update_ptr->pdir2;
-	}
+      {
+        if (*dir_update_ptr->pdir2 < 3)
+          ++*dir_update_ptr->pdir2;
+      }
       else
-	{ /* not taken */
-	  if (*dir_update_ptr->pdir2 > 0)
-	    --*dir_update_ptr->pdir2;
-	}
+      { /* not taken */
+        if (*dir_update_ptr->pdir2 > 0)
+          --*dir_update_ptr->pdir2;
+      }
     }
 
   /* meta predictor */
   if (dir_update_ptr->pmeta)
     {
       if (dir_update_ptr->dir.bimod != dir_update_ptr->dir.twolev)
-	{
-	  /* we only update meta predictor if directions were different */
-	  if (dir_update_ptr->dir.twolev == (unsigned int)taken)
-	    {
-	      /* 2-level predictor was correct */
-	      if (*dir_update_ptr->pmeta < 3)
-		++*dir_update_ptr->pmeta;
-	    }
-	  else
-	    {
-	      /* bimodal predictor was correct */
-	      if (*dir_update_ptr->pmeta > 0)
-		--*dir_update_ptr->pmeta;
-	    }
-	}
+      {
+        /* we only update meta predictor if directions were different */
+        if (dir_update_ptr->dir.twolev == (unsigned int)taken)
+          {
+            /* 2-level predictor was correct */
+            if (*dir_update_ptr->pmeta < 3)
+              ++*dir_update_ptr->pmeta;
+          }
+        else
+          {
+            /* bimodal predictor was correct */
+            if (*dir_update_ptr->pmeta > 0)
+              --*dir_update_ptr->pmeta;
+          }
+      }
     }
 
   /* update BTB (but only for taken branches) */
@@ -970,16 +1062,16 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
       dassert(taken);
 
       if (pbtb->addr == baddr)
-	{
-	  if (!correct)
-	    pbtb->target = btarget;
-	}
+      {
+        if (!correct)
+          pbtb->target = btarget;
+      }
       else
-	{
-	  /* enter a new branch in the table */
-	  pbtb->addr = baddr;
-	  pbtb->op = op;
-	  pbtb->target = btarget;
-	}
+      {
+        /* enter a new branch in the table */
+        pbtb->addr = baddr;
+        pbtb->op = op;
+        pbtb->target = btarget;
+      }
     }
 }
