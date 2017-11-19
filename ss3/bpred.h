@@ -112,6 +112,7 @@ enum bpred_class {
   BPredTaken,			/* static predict taken */
   BPredNotTaken,		/* static predict not taken */
   BPredNBPat,			/* nBAT prediction (n bit history window compare) */
+  BPredNBPatHybrid,		/* hybrid predictor using NBPat */
   BPred_NUM
 };
 
@@ -160,12 +161,13 @@ struct bpred_dir_t {
 /* branch predictor def */
 struct bpred_t {
   enum bpred_class class;	/* type of predictor */
+  enum bpred_class altpredClass; /* type of alternate predictor */
   struct {
     struct bpred_dir_t *bimod;	  /* first direction predictor */
     struct bpred_dir_t *twolev;	  /* second direction predictor */
     struct bpred_dir_t *meta;	  /* meta predictor */
-	struct bpred_dir_t *nbpat;  /* primary direction predictor */
-	struct bpred_dir_t *secondary;/* secondary direction predictor */
+	struct bpred_dir_t *nbpat;  /* nbpat direction predictor */
+	struct bpred_dir_t *altpred;/* altpred direction predictor */
   } dirpred;
 
   struct {
@@ -211,21 +213,31 @@ struct bpred_update_t {
     unsigned int bimod  : 1;    /* bimodal predictor */
     unsigned int twolev : 1;    /* 2-level predictor */
     unsigned int meta   : 1;    /* meta predictor (0..bimod / 1..2lev) */
+	unsigned int nbpat  : 1;	/* nbpat predictor */
+	unsigned int altpred: 1;	/* alternate predictor */
   } dir;
 };
 
+typedef struct {
+	enum bpred_class class;		/* type of predictor to create */
+	unsigned int bimod_size;	/* bimod table size */
+	unsigned int l1size;		/* level-1 table size */
+	unsigned int l2size;		/* level-2 table size */
+	unsigned int meta_size;		/* meta predictor table size */
+	unsigned int shift_width;	/* history register width */
+	unsigned int xor;			/* history xor address flag */
+	unsigned int nbpat_entries; /* number of nbpat entries in table */
+	unsigned int nbpat_bits;	/* number of bits in nbpat history search window */
+	unsigned char use_btb_ras;	/* flag to indicate whether or not BTB and ras should be used*/
+	unsigned int btb_sets;		/* number of sets in BTB */ 
+	unsigned int btb_assoc;		/* BTB associativity */
+	unsigned int retstack_size; /* num entries in ret-addr stack */
+	enum bpred_class altpred;
+} bpred_params, *p_bpred_params;
+
 /* create a branch predictor */
 struct bpred_t *			/* branch predictory instance */
-bpred_create(enum bpred_class class,	/* type of predictor to create */
-	     unsigned int bimod_size,	/* bimod table size */
-	     unsigned int l1size,	/* level-1 table size */
-	     unsigned int l2size,	/* level-2 table size */
-	     unsigned int meta_size,	/* meta predictor table size */
-	     unsigned int shift_width,	/* history register width */
-	     unsigned int xor,		/* history xor address flag */
-	     unsigned int btb_sets,	/* number of sets in BTB */ 
-	     unsigned int btb_assoc,	/* BTB associativity */
-	     unsigned int retstack_size);/* num entries in ret-addr stack */
+bpred_create(bpred_params* params);
 
 /* create a branch direction predictor */
 struct bpred_dir_t *		/* branch direction predictor instance */
@@ -236,6 +248,9 @@ bpred_dir_create (
   unsigned int shift_width,	/* history register width */
   unsigned int xor);	   	/* history xor address flag */
 
+ /* Helper function to get enum from string for class type */
+enum bpred_class bpred_name_lookup(char* name);
+  
 /* print branch predictor configuration */
 void
 bpred_config(struct bpred_t *pred,	/* branch predictor instance */

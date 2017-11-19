@@ -112,6 +112,7 @@ static int fetch_speed;
 
 /* branch predictor type {nottaken|taken|perfect|bimod|2lev} */
 static char *pred_type;
+static char *alt_pred_type;
 
 /* bimodal predictor config (<table_size>) */
 static int bimod_nelt = 1;
@@ -123,10 +124,11 @@ static int twolev_nelt = 4;
 static int twolev_config[4] =
   { /* l1size */1, /* l2size */1024, /* hist */8, /* xor */FALSE};
 
-/* 2-level predictor config (<tableSize> <nbpatBits>) */
+/* nbpat predictor config (<tableSize> <nbpatBits>) */
 static int nbpat_nelt = 2;
 static int nbpat_config[2] =
   { /* tableSize */2048, /* nbpatBits */16};
+
   
 /* combining predictor config (<meta_table_size> */
 static int comb_nelt = 1;
@@ -638,25 +640,34 @@ sim_reg_options(struct opt_odb_t *odb)
 
   /* branch predictor options */
 
+  /* branch predictor options */
   opt_reg_note(odb,
 "  Branch predictor configuration examples for 2-level predictor:\n"
 "    Configurations:   N, M, W, X\n"
 "      N   # entries in first level (# of shift register(s))\n"
-"      W   width of shift register(s)\n"
 "      M   # entries in 2nd level (# of counters, or other FSM)\n"
+"      W   width of shift register(s)\n"
 "      X   (yes-1/no-0) xor history and address for 2nd level index\n"
 "    Sample predictors:\n"
-"      GAg     : 1, W, 2^W, 0\n"
-"      GAp     : 1, W, M (M > 2^W), 0\n"
-"      PAg     : N, W, 2^W, 0\n"
-"      PAp     : N, W, M (M == 2^(N+W)), 0\n"
-"      gshare  : 1, W, 2^W, 1\n"
+"      GAg     : 1, 2^W, W, 0\n"
+"      GAp     : 1, M (M > 2^W), W, 0\n"
+"      PAg     : N, 2^W, W, 0\n"
+"      PAp     : N, M (M == 2^(N+W)), W, 0\n"
+"      gshare  : 1, 2^W, W, 1\n"
 "  Predictor `comb' combines a bimodal and a 2-level predictor.\n"
+"  Predictor 'nbpat_hybrid' combines the nbpat predictor with\n"
+"            another predictor of choice. Specify the alternate\n"
+"            predictor with the -altpred option.\n"
                );
 
   opt_reg_string(odb, "-bpred",
-		 "branch predictor type {nottaken|taken|perfect|bimod|2lev|comb|nbpat}",
+		 "branch predictor type {nottaken|taken|perfect|bimod|2lev|comb|nbpat|nbpat_hybrid}",
                  &pred_type, /* default */"bimod",
+                 /* print */TRUE, /* format */NULL);
+                 
+  opt_reg_string(odb, "-bpred:altpred",
+		 "alternate branch predictor type {nottaken|taken|perfect|bimod|2lev}",
+                 &alt_pred_type, /* default */"bimod",
                  /* print */TRUE, /* format */NULL);
 
   opt_reg_int_list(odb, "-bpred:bimod",
@@ -893,7 +904,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
 {
   char name[128], c;
   int nsets, bsize, assoc;
-
+  
   if (fastfwd_count < 0 || fastfwd_count >= 2147483647)
     fatal("bad fast forward count: %d", fastfwd_count);
 
@@ -907,102 +918,109 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
     fatal("front-end speed must be positive and non-zero");
   
   if (!mystricmp(pred_type, "perfect"))
-    {
-      /* perfect predictor */
-      pred = NULL;
-      pred_perfect = TRUE;
-    }
-  else if (!mystricmp(pred_type, "taken"))
-    {
-      /* static predictor, not taken */
-      pred = bpred_create(BPredTaken, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-    }
-  else if (!mystricmp(pred_type, "nottaken"))
-    {
-      /* static predictor, taken */
-      pred = bpred_create(BPredNotTaken, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-    }
-  else if (!mystricmp(pred_type, "bimod"))
-    {
-      /* bimodal predictor, bpred_create() checks BTB_SIZE */
-      if (bimod_nelt != 1)
-	fatal("bad bimod predictor config (<table_size>)");
-      if (btb_nelt != 2)
-	fatal("bad btb config (<num_sets> <associativity>)");
-
-      /* bimodal predictor, bpred_create() checks BTB_SIZE */
-      pred = bpred_create(BPred2bit,
-			  /* bimod table size */bimod_config[0],
-			  /* 2lev l1 size */0,
-			  /* 2lev l2 size */0,
-			  /* meta table size */0,
-			  /* history reg size */0,
-			  /* history xor address */0,
-			  /* btb sets */btb_config[0],
-			  /* btb assoc */btb_config[1],
-			  /* ret-addr stack size */ras_size);
-    }
-  else if (!mystricmp(pred_type, "2lev"))
-    {
-      /* 2-level adaptive predictor, bpred_create() checks args */
-      if (twolev_nelt != 4)
-	fatal("bad 2-level pred config (<l1size> <l2size> <hist_size> <xor>)");
-      if (btb_nelt != 2)
-	fatal("bad btb config (<num_sets> <associativity>)");
-
-      pred = bpred_create(BPred2Level,
-			  /* bimod table size */0,
-			  /* 2lev l1 size */twolev_config[0],
-			  /* 2lev l2 size */twolev_config[1],
-			  /* meta table size */0,
-			  /* history reg size */twolev_config[2],
-			  /* history xor address */twolev_config[3],
-			  /* btb sets */btb_config[0],
-			  /* btb assoc */btb_config[1],
-			  /* ret-addr stack size */ras_size);
-    }
-  else if (!mystricmp(pred_type, "comb"))
-    {
-      /* combining predictor, bpred_create() checks args */
-      if (twolev_nelt != 4)
-	fatal("bad 2-level pred config (<l1size> <l2size> <hist_size> <xor>)");
-      if (bimod_nelt != 1)
-	fatal("bad bimod predictor config (<table_size>)");
-      if (comb_nelt != 1)
-	fatal("bad combining predictor config (<meta_table_size>)");
-      if (btb_nelt != 2)
-	fatal("bad btb config (<num_sets> <associativity>)");
-
-      pred = bpred_create(BPredComb,
-			  /* bimod table size */bimod_config[0],
-			  /* l1 size */twolev_config[0],
-			  /* l2 size */twolev_config[1],
-			  /* meta table size */comb_config[0],
-			  /* history reg size */twolev_config[2],
-			  /* history xor address */twolev_config[3],
-			  /* btb sets */btb_config[0],
-			  /* btb assoc */btb_config[1],
-			  /* ret-addr stack size */ras_size);
-    }
-  else if(!mystricmp(pred_type, "nbpat"))
   {
-    if (nbpat_nelt != 2)
-      fatal("bad nbpat pred config (<tableSize> <nbpatBits> )");
-    
-      pred = bpred_create(BPredNBPat,
-        /* bimod table size */ 0, //bimod_config[0],
-			  /* l1 size */nbpat_config[0],
-			  /* l2 size */ 0, //twolev_config[1],
-			  /* meta table size */ 0, //comb_config[0],
-			  /* history reg size */ nbpat_config[1],
-			  /* history xor address */ 0, //twolev_config[3],
-			  /* btb sets */btb_config[0],
-			  /* btb assoc */btb_config[1],
-			  /* ret-addr stack size */ras_size);
-      
+    /* perfect predictor */
+    pred = NULL;
+    pred_perfect = TRUE;
   }
-  else
-    fatal("cannot parse predictor type `%s'", pred_type);
+  else 
+  {
+    pred_perfect = FALSE;
+    
+    bpred_params params;
+    memset(&params, 0, sizeof(bpred_params));
+    params.class = bpred_name_lookup(pred_type);
+    
+    if(params.class == BPred_NUM)
+      fatal("cannot parse predictor type `%s'", pred_type);
+    
+    //Get the required parameters for the BPred and store in struct
+    switch(params.class)
+    {
+      case BPredTaken:
+      case BPredNotTaken:
+        break;
+      case BPred2bit:
+        if (bimod_nelt != 1)
+          fatal("bad bimod predictor config (<table_size>)");
+        params.bimod_size = bimod_config[0];
+        break;
+      case BPred2Level:
+        if (twolev_nelt != 4)
+          fatal("bad 2-level pred config (<l1size> <l2size> <hist_size> <xor>)");
+        if (btb_nelt != 2)
+          fatal("bad btb config (<num_sets> <associativity>)");
+        params.l1size = twolev_config[0];
+        params.l2size = twolev_config[1];
+        params.shift_width = twolev_config[2];
+        params.xor = twolev_config[3];
+        break;
+      case BPredComb:
+        if (twolev_nelt != 4)
+          fatal("bad 2-level pred config (<l1size> <l2size> <hist_size> <xor>)");
+        if (bimod_nelt != 1)
+          fatal("bad bimod predictor config (<table_size>)");
+        if (comb_nelt != 1)
+          fatal("bad combining predictor config (<meta_table_size>)");
+        params.l1size = twolev_config[0];
+        params.l2size = twolev_config[1];
+        params.shift_width = twolev_config[2];
+        params.xor = twolev_config[3];
+        
+        params.bimod_size = bimod_config[0];
+        
+        params.meta_size = comb_config[0];
+        break;
+      case BPredNBPatHybrid:
+        params.altpred = bpred_name_lookup(alt_pred_type);
+        if (params.altpred == BPred_NUM)
+          fatal("cannot parse alternate predictor option '%s'", alt_pred_type);
+        if (twolev_nelt != 4)
+         fatal("bad 2-level pred config (<l1size> <l2size> <hist_size> <xor>)");
+        if (bimod_nelt != 1)
+          fatal("bad bimod predictor config (<table_size>)");
+        if (nbpat_nelt != 2)
+          fatal("bad nbpat pred config (<tableSize> <nbpatBits> )");
+        
+        params.l1size = twolev_config[0];
+        params.l2size = twolev_config[1];
+        params.shift_width = twolev_config[2];
+        params.xor = twolev_config[3];
+        
+        params.bimod_size = bimod_config[0];
+        
+        params.nbpat_entries = nbpat_config[0];
+        params.nbpat_bits = nbpat_config[1];
+        
+        params.meta_size = nbpat_config[0]; //Set meta size to the same size as nbpat table
+        break;
+      case BPredNBPat:
+        if (nbpat_nelt != 2)
+          fatal("bad nbpat pred config (<tableSize> <nbpatBits> )");
+        params.nbpat_entries = nbpat_config[0];
+        params.nbpat_bits = nbpat_config[1];
+        break;
+      default:
+        fatal("Shouldn't get here, unknown BPred type");
+    }
+    
+    params.use_btb_ras = FALSE;
+    
+    //BTB and RAS parameters for stateful predictors
+    if(params.class != BPredTaken && params.class != BPredNotTaken)
+    {
+      if (btb_nelt != 2)
+        fatal("bad btb config (<num_sets> <associativity>)");
+      
+      params.btb_sets = btb_config[0];
+      params.btb_assoc = btb_config[1];
+      params.retstack_size = ras_size;
+      params.use_btb_ras = TRUE;
+    }
+    
+    //Construct using parameters struct
+    pred = bpred_create(&params);
+  } 
 
   if (!bpred_spec_opt)
     bpred_spec_update = spec_CT;
@@ -3749,7 +3767,7 @@ ruu_dispatch(void)
   half_t temp_half = 0;			/* " ditto " */
   word_t temp_word = 0;			/* " ditto " */
 #ifdef HOST_HAS_QWORD
-  qword_t temp_qword = 0;		/* " ditto " */
+  //qword_t temp_qword = 0;		/* " ditto " */
 #endif /* HOST_HAS_QWORD */
   enum md_fault_type fault;
 
@@ -4481,7 +4499,7 @@ sim_main(void)
       half_t temp_half = 0;		/* " ditto " */
       word_t temp_word = 0;		/* " ditto " */
 #ifdef HOST_HAS_QWORD
-      qword_t temp_qword = 0;		/* " ditto " */
+      //qword_t temp_qword = 0;		/* " ditto " */
 #endif /* HOST_HAS_QWORD */
       enum md_fault_type fault;
 

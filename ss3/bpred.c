@@ -62,123 +62,145 @@
 /* turn this on to enable the SimpleScalar 2.0 RAS bug */
 /* #define RAS_BUG_COMPATIBLE */
 
+char* bpred_rev_name_lookup(enum bpred_class class)
+{
+  switch(class)
+  {
+    case BPred2Level:       return "2lev";
+    case BPred2bit:         return "bimod";
+    case BPredNBPat:        return "nbpat";
+    case BPredTaken:        return "taken";
+    case BPredNotTaken:     return "nottaken";
+    case BPredNBPatHybrid:  return "nbpat_hybrid";
+    case BPredComb:         return "comb";
+    default:                return "unknown";
+  }
+}
+
+enum bpred_class bpred_name_lookup(char* name)
+{
+  if (!mystricmp(name, "2lev")) return BPred2Level;
+  else if (!mystricmp(name, "bimod")) return BPred2bit;
+  else if (!mystricmp(name, "nbpat")) return BPredNBPat;
+  else if (!mystricmp(name, "taken")) return BPredTaken;
+  else if (!mystricmp(name, "nottaken")) return BPredNotTaken;
+  else if (!mystricmp(name, "nbpat_hybrid")) return BPredNBPatHybrid;
+  else if (!mystricmp(name, "comb")) return BPredComb;
+  else panic("bogus branch direction predictor class: '%s'", name);
+  
+  return BPred_NUM;
+};
+
 /* create a branch predictor */
 struct bpred_t *			/* branch predictory instance */
-bpred_create(enum bpred_class class,	/* type of predictor to create */
-	     unsigned int bimod_size,	/* bimod table size */
-	     unsigned int l1size,	/* 2lev l1 table size */
-	     unsigned int l2size,	/* 2lev l2 table size */
-	     unsigned int meta_size,	/* meta table size */
-	     unsigned int shift_width,	/* history register width */
-	     unsigned int xor,  	/* history xor address flag */
-	     unsigned int btb_sets,	/* number of sets in BTB */ 
-	     unsigned int btb_assoc,	/* BTB associativity */
-	     unsigned int retstack_size) /* num entries in ret-addr stack */
+bpred_create(bpred_params* params)
 {
   struct bpred_t *pred;
 
   if (!(pred = calloc(1, sizeof(struct bpred_t))))
     fatal("out of virtual memory");
 
-  pred->class = class;
+  pred->class = params->class;
+  pred->altpredClass = params->altpred; //Initialize to invalid, only change if class==nbpatHybrid
 
-  switch (class) {
+  switch (params->class) {
   case BPredComb:
     /* bimodal component */
     pred->dirpred.bimod = 
-      bpred_dir_create(BPred2bit, bimod_size, 0, 0, 0);
+      bpred_dir_create(BPred2bit, params->bimod_size, 0, 0, 0);
 
     /* 2-level component */
     pred->dirpred.twolev = 
-      bpred_dir_create(BPred2Level, l1size, l2size, shift_width, xor);
+      bpred_dir_create(BPred2Level, params->l1size, params->l2size, params->shift_width, params->xor);
 
     /* metapredictor component */
     pred->dirpred.meta = 
-      bpred_dir_create(BPred2bit, meta_size, 0, 0, 0);
+      bpred_dir_create(BPred2bit, params->meta_size, 0, 0, 0);
 
     break;
 
   case BPred2Level:
     pred->dirpred.twolev = 
-      bpred_dir_create(class, l1size, l2size, shift_width, xor);
-
+      bpred_dir_create(params->class, params->l1size, params->l2size, params->shift_width, params->xor);
     break;
 
   case BPred2bit:
     pred->dirpred.bimod = 
-      bpred_dir_create(class, bimod_size, 0, 0, 0);
+      bpred_dir_create(params->class, params->bimod_size, 0, 0, 0);
     break;
-    
+  case BPredNBPatHybrid:
+    switch(params->altpred) {
+      case BPred2Level:
+        pred->dirpred.twolev = 
+          bpred_dir_create(params->altpred, params->l1size, params->l2size, params->shift_width, params->xor);
+        pred->dirpred.altpred = pred->dirpred.twolev;
+        break;
+      case BPred2bit:
+        pred->dirpred.bimod = 
+          bpred_dir_create(params->altpred, params->bimod_size, 0, 0, 0);
+        pred->dirpred.altpred = pred->dirpred.bimod;
+        break;
+      case BPredTaken:
+      case BPredNotTaken:
+        panic("Can't use taken nor nottaken predictors as nbpat_hybrid alt. predictor");
+      default:
+        panic("bogus alternate predictor class");
+    }
+    pred->dirpred.meta = 
+      bpred_dir_create(BPred2bit, params->meta_size, 0, 0, 0);
   case BPredNBPat:
     pred->dirpred.nbpat =
-      bpred_dir_create(class, l1size, 0, shift_width, 0);
-    //TODO: Create secondary predictor for hybrid
+      bpred_dir_create(BPredNBPat, params->nbpat_entries, 0, params->nbpat_bits, 0);
     break;
-
   case BPredTaken:
   case BPredNotTaken:
     /* no other state */
     break;
 
   default:
-    panic("bogus predictor class");
+    panic("bogus predictor class %d", params->class);
   }
 
   /* allocate ret-addr stack */
-  switch (class) {
-  case BPredComb:
-  case BPred2Level:
-  case BPred2bit:
-  case BPredNBPat:  //nBPat can use BTB and RAS.. will help accentuate benefits
-    {
-      int i;
+  if(params->use_btb_ras)
+  {
+    int i;
 
-      /* allocate BTB */
-      if (!btb_sets || (btb_sets & (btb_sets-1)) != 0)
-	fatal("number of BTB sets must be non-zero and a power of two");
-      if (!btb_assoc || (btb_assoc & (btb_assoc-1)) != 0)
-	fatal("BTB associativity must be non-zero and a power of two");
+    /* allocate BTB */
+    if (!params->btb_sets || (params->btb_sets & (params->btb_sets-1)) != 0)
+      fatal("number of BTB sets must be non-zero and a power of two");
+    if (!params->btb_assoc || (params->btb_assoc & (params->btb_assoc-1)) != 0)
+      fatal("BTB associativity must be non-zero and a power of two");
 
-      if (!(pred->btb.btb_data = calloc(btb_sets * btb_assoc,
-					sizeof(struct bpred_btb_ent_t))))
-	fatal("cannot allocate BTB");
+    if (!(pred->btb.btb_data = calloc(params->btb_sets * params->btb_assoc,
+        sizeof(struct bpred_btb_ent_t))))
+      fatal("cannot allocate BTB");
 
-      pred->btb.sets = btb_sets;
-      pred->btb.assoc = btb_assoc;
+    pred->btb.sets = params->btb_sets;
+    pred->btb.assoc = params->btb_assoc;
 
-      if (pred->btb.assoc > 1)
-	for (i=0; i < (pred->btb.assoc*pred->btb.sets); i++)
-	  {
-	    if (i % pred->btb.assoc != pred->btb.assoc - 1)
-	      pred->btb.btb_data[i].next = &pred->btb.btb_data[i+1];
-	    else
-	      pred->btb.btb_data[i].next = NULL;
-	    
-	    if (i % pred->btb.assoc != pred->btb.assoc - 1)
-	      pred->btb.btb_data[i+1].prev = &pred->btb.btb_data[i];
-	  }
+    if (pred->btb.assoc > 1)
+      for (i=0; i < (pred->btb.assoc*pred->btb.sets); i++)
+      {
+        if (i % pred->btb.assoc != pred->btb.assoc - 1)
+          pred->btb.btb_data[i].next = &pred->btb.btb_data[i+1];
+        else
+          pred->btb.btb_data[i].next = NULL;
+        
+        if (i % pred->btb.assoc != pred->btb.assoc - 1)
+          pred->btb.btb_data[i+1].prev = &pred->btb.btb_data[i];
+      }
 
-      /* allocate retstack */
-      if ((retstack_size & (retstack_size-1)) != 0)
-	fatal("Return-address-stack size must be zero or a power of two");
-      
-      pred->retstack.size = retstack_size;
-      if (retstack_size)
-	if (!(pred->retstack.stack = calloc(retstack_size, 
-					    sizeof(struct bpred_btb_ent_t))))
-	  fatal("cannot allocate return-address-stack");
-      pred->retstack.tos = retstack_size - 1;
-      
-      break;
-    }
-
-  case BPredTaken:
-  case BPredNotTaken:
-    /* no other state */
-    break;
-
-  default:
-    panic("bogus predictor class");
+    /* allocate retstack */
+    if ((params->retstack_size & (params->retstack_size-1)) != 0)
+      fatal("Return-address-stack size must be zero or a power of two");
+    
+    pred->retstack.size = params->retstack_size;
+    if (pred->retstack.size)
+      if (!(pred->retstack.stack = calloc(pred->retstack.size, 
+                sizeof(struct bpred_btb_ent_t))))
+        fatal("cannot allocate return-address-stack");
+    pred->retstack.tos = pred->retstack.size - 1;
   }
 
   return pred;
@@ -207,36 +229,36 @@ bpred_dir_create (
   case BPred2Level:
     {
       if (!l1size || (l1size & (l1size-1)) != 0)
-	fatal("level-1 size, `%d', must be non-zero and a power of two", 
-	      l1size);
+        fatal("level-1 size, `%d', must be non-zero and a power of two", 
+              l1size);
       pred_dir->config.two.l1size = l1size;
       
       if (!l2size || (l2size & (l2size-1)) != 0)
-	fatal("level-2 size, `%d', must be non-zero and a power of two", 
-	      l2size);
+        fatal("level-2 size, `%d', must be non-zero and a power of two", 
+              l2size);
       pred_dir->config.two.l2size = l2size;
       
       if (!shift_width || shift_width > 30)
-	fatal("shift register width, `%d', must be non-zero and positive",
-	      shift_width);
+        fatal("shift register width, `%d', must be non-zero and positive",
+              shift_width);
       pred_dir->config.two.shift_width = shift_width;
       
       pred_dir->config.two.xor = xor;
       pred_dir->config.two.shiftregs = calloc(l1size, sizeof(int));
       if (!pred_dir->config.two.shiftregs)
-	fatal("cannot allocate shift register table");
+        fatal("cannot allocate shift register table");
       
       pred_dir->config.two.l2table = calloc(l2size, sizeof(unsigned char));
       if (!pred_dir->config.two.l2table)
-	fatal("cannot allocate second level table");
+        fatal("cannot allocate second level table");
 
       /* initialize counters to weakly this-or-that */
       flipflop = 1;
       for (cnt = 0; cnt < l2size; cnt++)
-	{
-	  pred_dir->config.two.l2table[cnt] = flipflop;
-	  flipflop = 3 - flipflop;
-	}
+      {
+        pred_dir->config.two.l2table[cnt] = flipflop;
+        flipflop = 3 - flipflop;
+      }
 
       break;
     }
@@ -252,10 +274,10 @@ bpred_dir_create (
     /* initialize counters to weakly this-or-that */
     flipflop = 1;
     for (cnt = 0; cnt < l1size; cnt++)
-      {
-	pred_dir->config.bimod.table[cnt] = flipflop;
-	flipflop = 3 - flipflop;
-      }
+    {
+      pred_dir->config.bimod.table[cnt] = flipflop;
+      flipflop = 3 - flipflop;
+    }
 
     break;
   
@@ -268,7 +290,7 @@ bpred_dir_create (
         fatal("nbpat pattern bits (shift_width), `%d', must be non-zero and positive",
 	      shift_width);
     pred_dir->config.nbpat.nbpatBits = shift_width;
-    if (!(pred_dir->config.bimod.table = calloc(l1size, sizeof(bpred_nbpat_entry))))
+    if (!(pred_dir->config.nbpat.table = calloc(l1size, sizeof(bpred_nbpat_entry))))
       fatal("cannot allocate nbpat storage");
     //Zero this memory to intialize counters and history to zero
     memset(pred_dir->config.nbpat.table, 0, l1size * sizeof(bpred_nbpat_entry));
@@ -280,7 +302,7 @@ bpred_dir_create (
     break;
 
   default:
-    panic("bogus branch direction predictor class");
+    panic("bogus branch direction predictor class %d", class);
   }
 
   return pred_dir;
@@ -310,7 +332,6 @@ bpred_dir_config(
     fprintf(stream, "pred_dir: %s: nBPat: %d entries, %d pattern bits\n",
       name, pred_dir->config.nbpat.size, pred_dir->config.nbpat.nbpatBits);
     break;
-
   case BPredTaken:
     fprintf(stream, "pred_dir: %s: predict taken\n", name);
     break;
@@ -359,6 +380,15 @@ bpred_config(struct bpred_t *pred,	/* branch predictor instance */
 	    pred->btb.sets, pred->btb.assoc);
     fprintf(stream, "ret_stack: %d entries", pred->retstack.size);
     break;
+    
+  case BPredNBPatHybrid:
+    bpred_dir_config (pred->dirpred.nbpat, "nBPat", stream);
+    bpred_dir_config (pred->dirpred.altpred, bpred_rev_name_lookup(pred->altpredClass), stream);
+    bpred_dir_config (pred->dirpred.meta, "meta", stream);
+    fprintf(stream, "btb: %d sets x %d associativity", 
+	    pred->btb.sets, pred->btb.assoc);
+    fprintf(stream, "ret_stack: %d entries", pred->retstack.size);
+    break;
 
   case BPredTaken:
     bpred_dir_config (pred->dirpred.bimod, "taken", stream);
@@ -388,32 +418,17 @@ void
 bpred_reg_stats(struct bpred_t *pred,	/* branch predictor instance */
 		struct stat_sdb_t *sdb)	/* stats database */
 {
-  char buf[512], buf1[512], *name;
+  char buf[512], buf1[512], name[512];
 
   /* get a name for this predictor */
-  switch (pred->class)
-    {
-    case BPredComb:
-      name = "bpred_comb";
-      break;
-    case BPred2Level:
-      name = "bpred_2lev";
-      break;
-    case BPred2bit:
-      name = "bpred_bimod";
-      break;
-    case BPredNBPat:
-      name = "bpred_nbpat";
-      break;
-    case BPredTaken:
-      name = "bpred_taken";
-      break;
-    case BPredNotTaken:
-      name = "bpred_nottaken";
-      break;
-    default:
+  if(pred->class < BPred_NUM)
+  {
+      sprintf(name, "bpred_%s", bpred_rev_name_lookup(pred->class));
+  }
+  else
+  {
       panic("bogus branch predictor class");
-    }
+  }
 
   sprintf(buf, "%s.lookups", name);
   stat_reg_counter(sdb, buf, "total number of bpred lookups",
@@ -431,16 +446,27 @@ bpred_reg_stats(struct bpred_t *pred,	/* branch predictor instance */
 		   &pred->dir_hits, 0, NULL);
   //TODO: Something like this for hybrid branch prediction
   if (pred->class == BPredComb)
-    {
-      sprintf(buf, "%s.used_bimod", name);
-      stat_reg_counter(sdb, buf, 
-		       "total number of bimodal predictions used", 
-		       &pred->used_bimod, 0, NULL);
-      sprintf(buf, "%s.used_2lev", name);
-      stat_reg_counter(sdb, buf, 
-		       "total number of 2-level predictions used", 
-		       &pred->used_2lev, 0, NULL);
-    }
+  {
+    sprintf(buf, "%s.used_bimod", name);
+    stat_reg_counter(sdb, buf, 
+         "total number of bimodal predictions used", 
+         &pred->used_bimod, 0, NULL);
+    sprintf(buf, "%s.used_2lev", name);
+    stat_reg_counter(sdb, buf, 
+         "total number of 2-level predictions used", 
+         &pred->used_2lev, 0, NULL);
+  }
+  else if(pred->class == BPredNBPatHybrid)
+  {
+    sprintf(buf, "%s.used_nbpat", name);
+    stat_reg_counter(sdb, buf, 
+         "total number of nbpat predictions used", 
+         &pred->used_nbpat, 0, NULL);
+    sprintf(buf, "%s.used_altpred", name);
+    stat_reg_counter(sdb, buf, 
+         "total number of altpred predictions used", 
+         &pred->used_altpred, 0, NULL);
+  }
   sprintf(buf, "%s.misses", name);
   stat_reg_counter(sdb, buf, "total number of misses", &pred->misses, 0, NULL);
   sprintf(buf, "%s.jr_hits", name);
@@ -514,6 +540,8 @@ bpred_after_priming(struct bpred_t *bpred)
   bpred->used_ras = 0;
   bpred->used_bimod = 0;
   bpred->used_2lev = 0;
+  bpred->used_nbpat = 0;
+  bpred->used_altpred = 0;
   bpred->jr_hits = 0;
   bpred->jr_seen = 0;
   bpred->misses = 0;
@@ -665,15 +693,15 @@ bpred_lookup(struct bpred_t *pred,	/* branch predictor instance */
         dir_update_ptr->dir.bimod = (*bimod >= 2);
         dir_update_ptr->dir.twolev  = (*twolev >= 2);
         if (*meta >= 2)
-          {
-            dir_update_ptr->pdir1 = twolev;
-            dir_update_ptr->pdir2 = bimod;
-          }
+        {
+          dir_update_ptr->pdir1 = twolev;
+          dir_update_ptr->pdir2 = bimod;
+        }
         else
-          {
-            dir_update_ptr->pdir1 = bimod;
-            dir_update_ptr->pdir2 = twolev;
-          }
+        {
+          dir_update_ptr->pdir1 = bimod;
+          dir_update_ptr->pdir2 = twolev;
+        }
       }
       break;
     case BPred2Level:
@@ -695,6 +723,29 @@ bpred_lookup(struct bpred_t *pred,	/* branch predictor instance */
       {
         dir_update_ptr->pdir1 =
           bpred_dir_lookup (pred->dirpred.nbpat, baddr);
+      }
+      break;
+    case BPredNBPatHybrid:
+      if ((MD_OP_FLAGS(op) & (F_CTRL|F_UNCOND)) != (F_CTRL|F_UNCOND))
+      {
+        char *nbpat, *altpred, *meta;
+        nbpat = bpred_dir_lookup (pred->dirpred.nbpat, baddr);
+        altpred = bpred_dir_lookup (pred->dirpred.altpred, baddr);
+        meta = bpred_dir_lookup (pred->dirpred.meta, baddr);
+        dir_update_ptr->pmeta = meta;
+        dir_update_ptr->dir.meta  = (*meta >= 2);
+        dir_update_ptr->dir.twolev = (*nbpat >= 2);
+        dir_update_ptr->dir.bimod  = (*altpred >= 2);
+        if (*meta >= 2)
+        {
+          dir_update_ptr->pdir1 = nbpat;
+          dir_update_ptr->pdir2 = altpred;
+        }
+        else
+        {
+          dir_update_ptr->pdir1 = altpred;
+          dir_update_ptr->pdir2 = nbpat;
+        }
       }
       break;
     case BPredTaken:
@@ -857,12 +908,18 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
         pred->ras_hits++;
     }
   else if ((MD_OP_FLAGS(op) & (F_CTRL|F_COND)) == (F_CTRL|F_COND))
+  {
+    if (dir_update_ptr->dir.meta)
     {
-      if (dir_update_ptr->dir.meta)
-        pred->used_2lev++;
-      else
-        pred->used_bimod++;
+      pred->used_2lev++;
+      pred->used_nbpat++;
     }
+    else
+    {
+      pred->used_bimod++;
+      pred->used_altpred++;
+    }
+  }
 
   /* keep stats about JR's; also, but don't change any bpred state for JR's
    * which are returns unless there's no retstack */
@@ -908,9 +965,11 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
   /* update L1 table if appropriate */
   /* L1 table is updated unconditionally for combining predictor too */
   if ((MD_OP_FLAGS(op) & (F_CTRL|F_UNCOND)) != (F_CTRL|F_UNCOND)) {
-    if(pred->class == BPred2Level || pred->class == BPredComb)
+    if(pred->class == BPred2Level || pred->class == BPredComb || pred->altpredClass == BPred2Level)
     {
       int l1index, shift_reg;
+      
+      //No pointer magic needed for nBPat Hybrid... initialization pointed the altpred to 2lev
       
       /* also update appropriate L1 history register */
       l1index =
@@ -920,7 +979,7 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
       pred->dirpred.twolev->config.two.shiftregs[l1index] =
 	shift_reg & ((1 << pred->dirpred.twolev->config.two.shift_width) - 1);
     }
-    else if(pred->class == BPredNBPat)
+    else if(pred->class == BPredNBPat || pred->class == BPredNBPatHybrid)
     {
         bpred_nbpat_entry* entry;
         entry = &pred->dirpred.nbpat->config.nbpat.table[(baddr & (pred->dirpred.nbpat->config.nbpat.size - 1))];
