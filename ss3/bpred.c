@@ -259,7 +259,7 @@ bpred_dir_create (
         pred_dir->config.two.l2table[cnt] = flipflop;
         flipflop = 3 - flipflop;
       }
-
+      info("Successfully created 2 level predictor");
       break;
     }
 
@@ -278,7 +278,7 @@ bpred_dir_create (
       pred_dir->config.bimod.table[cnt] = flipflop;
       flipflop = 3 - flipflop;
     }
-
+    info("Successfully created 2 bit/bimodal predictor");
     break;
   
   case BPredNBPat:
@@ -294,10 +294,12 @@ bpred_dir_create (
       fatal("cannot allocate nbpat storage");
     //Zero this memory to intialize counters and history to zero
     memset(pred_dir->config.nbpat.table, 0, l1size * sizeof(bpred_nbpat_entry));
+    info("Successfully created nBPAT predictor");
     break;
 
   case BPredTaken:
   case BPredNotTaken:
+    info("Successfully created taken or nottaken predictor");
     /* no other state */
     break;
 
@@ -621,7 +623,7 @@ bpred_dir_lookup(struct bpred_dir_t *pred_dir,	/* branch dir predictor inst */
                 tempWindow = (entry->history >> searchIndex)
                                 & ((1 << pred_dir->config.nbpat.nbpatBits) - 1);
                 
-                if((tempWindow & currentPattern) == currentPattern)
+                if(tempWindow == currentPattern)
                 {
                     predTaken = (unsigned char)((entry->history
                              >> (pred_dir->config.nbpat.nbpatBits + searchIndex)) & 0x1);
@@ -630,7 +632,7 @@ bpred_dir_lookup(struct bpred_dir_t *pred_dir,	/* branch dir predictor inst */
                 }
             }
         }
-        
+
         entry->tempCountToMakeSimHappy = predTaken ? 3 : 0; //Pretend saturating counter value
         p = &(entry->tempCountToMakeSimHappy);
       }
@@ -982,12 +984,21 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
     else if(pred->class == BPredNBPat || pred->class == BPredNBPatHybrid)
     {
         bpred_nbpat_entry* entry;
-        entry = &pred->dirpred.nbpat->config.nbpat.table[(baddr & (pred->dirpred.nbpat->config.nbpat.size - 1))];
-        entry->history = (entry->history << 1) | ((taken > 0) & 0x1);
-        if(entry->fillCount < (2 * pred->dirpred.nbpat->config.nbpat.nbpatBits))
+        int historySize;
+        int oldHistory;
+        int tableIndex;
+        char ready;
+        tableIndex = (baddr & (pred->dirpred.nbpat->config.nbpat.size - 1));
+        entry = &pred->dirpred.nbpat->config.nbpat.table[tableIndex];
+        historySize = 2 * pred->dirpred.nbpat->config.nbpat.nbpatBits;
+        ready = entry->fillCount >= historySize ? 1 : 0;
+        oldHistory = entry->history;
+        entry->history = (entry->history >> 1) | (((taken != 0) ? 1 : 0) << (historySize - 1));
+        if(entry->fillCount < (historySize))
         {
             entry->fillCount++;
         }
+        //info("Table addr %04d was %sready. Prediction: %stake branch, %scorrect. Old history: %08x, New history: %08x", tableIndex, (ready ? "    " : "not "), (pred_taken ? "      " : "don't "), (correct ? "  " : "in"), oldHistory, entry->history);
     }
   }
 

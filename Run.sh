@@ -1,5 +1,5 @@
 set -x
-BENCHMARK="perl"
+BENCHMARK="gcc"
 RESULT_DIR="./results/${BENCHMARK}"
 RESULT_FILE="./results/${BENCHMARK}.out"
 SIMULATOR="$PWD/ss3/sim-outorder"
@@ -14,7 +14,7 @@ SIMULATOR="$PWD/ss3/sim-outorder"
 #      gshare  : 1, 2^W, W, 1
 
 #Example of hybrid using nbpat and 2 level PAg
-SIM_ARGS="-fastfwd 100000000 -max:inst 10000000 -bpred nbpat_hybrid -bpred:altpred 2lev -bpred:2lev 2048 256 8 0 -bpred:nbpat 65536 16"
+SIM_ARGS="-fastfwd 100000000 -max:inst 10000000 -bpred nbpat_hybrid -bpred:altpred 2lev -bpred:2lev 2048 256 8 0 -bpred:nbpat 2048 1"
 #Example of hybrid using nbpat and GShare
 #SIM_ARGS="-fastfwd 100000000 -max:inst 10000000 -bpred nbpat_hybrid -bpred:altpred 2lev -bpred:2lev 1 1024 10 1 -bpred:nbpat 65536 16"
 
@@ -23,7 +23,7 @@ SIM_ARGS="-fastfwd 100000000 -max:inst 10000000 -bpred nbpat_hybrid -bpred:altpr
 
 
 #Example of just nbpat
-#SIM_ARGS="-fastfwd 100000000 -max:inst 10000000 -bpred nbpat -bpred:nbpat 65536 16"
+#SIM_ARGS="-fastfwd 100000000 -max:inst 10000000 -bpred nbpat -bpred:nbpat 4096 8"
 
 if [ ! -d "$RESULT_DIR" ]; then
 	mkdir -p $RESULT_DIR
